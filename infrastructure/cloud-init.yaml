@@ -1,0 +1,528 @@
+#cloud-config
+
+# Hetzner VPS Cloud-Init Configuration for LLM Security Audit Infrastructure
+# Server: cx23 (2 vCPU, 44 GB RAM, 80 GB SSD)
+# Purpose: Petri (Inspect AI) + FlagWise + PostgreSQL
+
+users:
+  - name: admin
+    groups: sudo, docker
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8o6ndVXDWrWfJZbJY8nQRRv162UWua2opUmYzNhSjC marius.moldovan@standivarius.com
+
+# Update system packages
+package_update: true
+package_upgrade: true
+
+# Install required packages
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - git
+  - python3-pip
+  - python3-venv
+  - ufw
+  - unattended-upgrades
+  - htop
+  - vim
+  - tmux
+  - jq
+
+# Write configuration files
+write_files:
+  # Docker Compose for Portainer
+  - path: /opt/portainer/docker-compose.yml
+    content: |
+      version: '3.8'
+
+      services:
+        portainer:
+          image: portainer/portainer-ce:latest
+          container_name: portainer
+          restart: always
+          ports:
+            - "9000:9000"
+            - "9443:9443"
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - portainer_data:/data
+          security_opt:
+            - no-new-privileges:true
+
+      volumes:
+        portainer_data:
+    permissions: '0644'
+
+  # Docker Compose for PostgreSQL
+  - path: /opt/postgresql/docker-compose.yml
+    content: |
+      version: '3.8'
+
+      services:
+        postgres:
+          image: postgres:16-alpine
+          container_name: postgres_main
+          restart: always
+          environment:
+            POSTGRES_USER: pgadmin
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ChangeMe123!}
+            POSTGRES_DB: audit_db
+          ports:
+            - "5432:5432"
+          volumes:
+            - postgres_data:/var/lib/postgresql/data
+            - ./init:/docker-entrypoint-initdb.d
+          healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U pgadmin -d audit_db"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+      volumes:
+        postgres_data:
+    permissions: '0644'
+
+  # PostgreSQL initialization script
+  - path: /opt/postgresql/init/01-init-databases.sql
+    content: |
+      -- Create databases for different services
+      CREATE DATABASE inspect_ai;
+      CREATE DATABASE flagwise;
+
+      -- Create users
+      CREATE USER inspect_user WITH PASSWORD 'InspectPass2024!';
+      CREATE USER flagwise_user WITH PASSWORD 'FlagwisePass2024!';
+
+      -- Grant privileges
+      GRANT ALL PRIVILEGES ON DATABASE inspect_ai TO inspect_user;
+      GRANT ALL PRIVILEGES ON DATABASE flagwise TO flagwise_user;
+
+      -- Connect to inspect_ai and grant schema privileges
+      \c inspect_ai;
+      GRANT ALL ON SCHEMA public TO inspect_user;
+
+      -- Connect to flagwise and grant schema privileges
+      \c flagwise;
+      GRANT ALL ON SCHEMA public TO flagwise_user;
+    permissions: '0644'
+
+  # Docker Compose for Inspect AI
+  - path: /opt/inspect-ai/docker-compose.yml
+    content: |
+      version: '3.8'
+
+      services:
+        inspect-ai:
+          build: .
+          container_name: inspect_ai
+          restart: unless-stopped
+          volumes:
+            - ./logs:/app/logs
+            - ./evals:/app/evals
+            - ./datasets:/app/datasets
+            - ./config:/app/.env.local
+          environment:
+            - INSPECT_LOG_DIR=/app/logs
+            - PYTHONUNBUFFERED=1
+          ports:
+            - "7000:7000"
+          depends_on:
+            - postgres
+          networks:
+            - audit_net
+
+        postgres:
+          image: postgres:16-alpine
+          container_name: inspect_postgres
+          restart: always
+          environment:
+            POSTGRES_USER: inspect_user
+            POSTGRES_PASSWORD: InspectPass2024!
+            POSTGRES_DB: inspect_ai
+          volumes:
+            - inspect_postgres_data:/var/lib/postgresql/data
+          networks:
+            - audit_net
+
+      volumes:
+        inspect_postgres_data:
+
+      networks:
+        audit_net:
+          driver: bridge
+    permissions: '0644'
+
+  # Inspect AI Dockerfile
+  - path: /opt/inspect-ai/Dockerfile
+    content: |
+      FROM python:3.11-slim
+
+      WORKDIR /app
+
+      # Install system dependencies
+      RUN apt-get update && apt-get install -y \
+          git \
+          curl \
+          && rm -rf /var/lib/apt/lists/*
+
+      # Install uv for fast Python package management
+      RUN pip install uv
+
+      # Clone inspect_evals repository
+      RUN git clone https://github.com/UKGovernmentBEIS/inspect_evals.git /tmp/inspect_evals && \
+          cp -r /tmp/inspect_evals/* /app/ && \
+          rm -rf /tmp/inspect_evals
+
+      # Install inspect-ai and inspect-evals
+      RUN uv pip install --system inspect-ai inspect-evals
+
+      # Install additional dependencies
+      RUN uv pip install --system \
+          psycopg2-binary \
+          python-dotenv \
+          anthropic \
+          openai
+
+      # Create directories for logs and data
+      RUN mkdir -p /app/logs /app/evals /app/datasets /app/.env.local
+
+      # Expose port for Inspect AI viewer
+      EXPOSE 7000
+
+      # Default command
+      CMD ["tail", "-f", "/dev/null"]
+    permissions: '0644'
+
+  # Environment template for Inspect AI
+  - path: /opt/inspect-ai/.env.template
+    content: |
+      # Inspect AI Configuration
+      INSPECT_LOG_DIR=/app/logs
+      INSPECT_EVAL_MODEL=anthropic/claude-3-5-sonnet-20241022
+
+      # API Keys (REQUIRED - Add your keys)
+      ANTHROPIC_API_KEY=your_anthropic_api_key_here
+      OPENAI_API_KEY=your_openai_api_key_here
+
+      # PostgreSQL Configuration
+      POSTGRES_HOST=postgres
+      POSTGRES_PORT=5432
+      POSTGRES_USER=inspect_user
+      POSTGRES_PASSWORD=InspectPass2024!
+      POSTGRES_DB=inspect_ai
+    permissions: '0644'
+
+  # Firewall setup script
+  - path: /tmp/setup-firewall.sh
+    content: |
+      #!/bin/bash
+      set -e
+
+      # Reset UFW to default
+      ufw --force reset
+
+      # Default policies
+      ufw default deny incoming
+      ufw default allow outgoing
+
+      # Allow SSH
+      ufw allow 22/tcp comment 'SSH'
+
+      # Allow HTTP/HTTPS
+      ufw allow 80/tcp comment 'HTTP'
+      ufw allow 443/tcp comment 'HTTPS'
+
+      # Allow Portainer
+      ufw allow 9000/tcp comment 'Portainer'
+      ufw allow 9443/tcp comment 'Portainer HTTPS'
+
+      # Allow PostgreSQL (restrict to localhost if needed)
+      ufw allow 5432/tcp comment 'PostgreSQL'
+
+      # Allow Inspect AI viewer
+      ufw allow 7000/tcp comment 'Inspect AI Viewer'
+
+      # Enable UFW
+      ufw --force enable
+
+      # Show status
+      ufw status verbose
+    permissions: '0755'
+
+  # Main setup script
+  - path: /tmp/setup-infrastructure.sh
+    content: |
+      #!/bin/bash
+      set -e
+
+      echo "=== Starting Infrastructure Setup ==="
+
+      # Generate random PostgreSQL password
+      POSTGRES_PASSWORD=$(openssl rand -base64 32)
+      echo "Generated PostgreSQL password: $POSTGRES_PASSWORD"
+      echo "$POSTGRES_PASSWORD" > /root/postgres_password.txt
+      chmod 600 /root/postgres_password.txt
+
+      # Generate Portainer admin password
+      PORTAINER_PASSWORD=$(openssl rand -base64 32)
+      echo "Generated Portainer password: $PORTAINER_PASSWORD"
+      echo "$PORTAINER_PASSWORD" > /root/portainer_password.txt
+      chmod 600 /root/portainer_password.txt
+
+      # Update PostgreSQL password in docker-compose
+      export POSTGRES_PASSWORD
+
+      # Start Portainer
+      echo "=== Starting Portainer ==="
+      cd /opt/portainer
+      docker-compose up -d
+
+      # Wait for Portainer to start
+      sleep 10
+
+      # Start PostgreSQL
+      echo "=== Starting PostgreSQL ==="
+      cd /opt/postgresql
+      docker-compose up -d
+
+      # Wait for PostgreSQL to be ready
+      echo "Waiting for PostgreSQL to be ready..."
+      sleep 15
+
+      # Build and start Inspect AI
+      echo "=== Building Inspect AI ==="
+      cd /opt/inspect-ai
+      docker-compose build
+      echo "=== Starting Inspect AI ==="
+      docker-compose up -d
+
+      # Get server IP
+      SERVER_IP=$(curl -s ifconfig.me)
+
+      # Create deployment info file
+      cat > /root/DEPLOYMENT_INFO.txt <<EOF
+      ================================================================================
+      HETZNER VPS - LLM SECURITY AUDIT INFRASTRUCTURE
+      ================================================================================
+
+      Server IP: $SERVER_IP
+      Deployment Date: $(date)
+
+      --------------------------------------------------------------------------------
+      SSH ACCESS
+      --------------------------------------------------------------------------------
+      Command: ssh admin@$SERVER_IP
+      User: admin
+      SSH Key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8o6ndVXDWrWfJZbJY8nQRRv162UWua2opUmYzNhSjC
+
+      --------------------------------------------------------------------------------
+      PORTAINER (Docker Management UI)
+      --------------------------------------------------------------------------------
+      URL: http://$SERVER_IP:9000
+      HTTPS URL: https://$SERVER_IP:9443
+
+      Initial Setup:
+      1. Open the URL in your browser
+      2. Create admin account on first login
+      3. Username: admin
+      4. Set your own password (min 12 characters)
+
+      Initial Admin Password: $PORTAINER_PASSWORD
+      (Change this immediately after first login!)
+
+      --------------------------------------------------------------------------------
+      POSTGRESQL
+      --------------------------------------------------------------------------------
+      Host: $SERVER_IP
+      Port: 5432
+
+      Main Admin:
+        Database: audit_db
+        Username: pgadmin
+        Password: $POSTGRES_PASSWORD
+
+      Inspect AI Database:
+        Database: inspect_ai
+        Username: inspect_user
+        Password: InspectPass2024!
+
+      FlagWise Database:
+        Database: flagwise
+        Username: flagwise_user
+        Password: FlagwisePass2024!
+
+      Connection String (Inspect AI):
+      postgresql://inspect_user:InspectPass2024!@$SERVER_IP:5432/inspect_ai
+
+      Connection String (FlagWise):
+      postgresql://flagwise_user:FlagwisePass2024!@$SERVER_IP:5432/flagwise
+
+      --------------------------------------------------------------------------------
+      INSPECT AI (Petri Evaluations)
+      --------------------------------------------------------------------------------
+      Container: inspect_ai
+      Status: Running
+      Logs Directory: /opt/inspect-ai/logs
+      Evals Directory: /opt/inspect-ai/evals
+
+      View Logs:
+        docker logs inspect_ai
+
+      Run Evaluation:
+        docker exec -it inspect_ai uv run inspect eval inspect_evals/arc_easy --model anthropic/claude-3-5-sonnet-20241022
+
+      View Results:
+        docker exec -it inspect_ai uv run inspect view
+
+      Access Viewer:
+        URL: http://$SERVER_IP:7000
+
+      Configure API Keys:
+        1. SSH into the server
+        2. Edit /opt/inspect-ai/.env.local
+        3. Add your ANTHROPIC_API_KEY and OPENAI_API_KEY
+        4. Restart: docker-compose -f /opt/inspect-ai/docker-compose.yml restart
+
+      --------------------------------------------------------------------------------
+      FLAGWISE (Feature Flag & Audit System)
+      --------------------------------------------------------------------------------
+      Status: Not yet deployed (ready for deployment)
+      Repository: https://github.com/bluewave-labs/flagwise
+
+      To Deploy:
+        1. SSH into server
+        2. cd /opt
+        3. git clone https://github.com/bluewave-labs/flagwise.git
+        4. cd flagwise
+        5. Update docker-compose.yml with PostgreSQL credentials
+        6. docker-compose up -d
+
+      Configuration:
+        - Database: PostgreSQL (already running)
+        - Database Connection: Use flagwise_user credentials above
+        - Default Port: 3000 (frontend), 8000 (backend)
+        - Update firewall: ufw allow 3000/tcp && ufw allow 8000/tcp
+
+      --------------------------------------------------------------------------------
+      FIREWALL STATUS
+      --------------------------------------------------------------------------------
+      Active Ports:
+        - 22 (SSH)
+        - 80 (HTTP)
+        - 443 (HTTPS)
+        - 5432 (PostgreSQL)
+        - 7000 (Inspect AI Viewer)
+        - 9000 (Portainer)
+        - 9443 (Portainer HTTPS)
+
+      Check Status: sudo ufw status verbose
+
+      --------------------------------------------------------------------------------
+      SYSTEM MAINTENANCE
+      --------------------------------------------------------------------------------
+      Automatic Security Updates: ENABLED
+
+      Update Docker Containers:
+        cd /opt/portainer && docker-compose pull && docker-compose up -d
+        cd /opt/postgresql && docker-compose pull && docker-compose up -d
+        cd /opt/inspect-ai && docker-compose pull && docker-compose up -d
+
+      System Updates:
+        sudo apt update && sudo apt upgrade -y
+
+      View Docker Status:
+        docker ps -a
+
+      --------------------------------------------------------------------------------
+      BACKUP RECOMMENDATIONS
+      --------------------------------------------------------------------------------
+      1. PostgreSQL Data: /var/lib/docker/volumes/postgresql_postgres_data
+      2. Inspect AI Logs: /opt/inspect-ai/logs
+      3. Portainer Data: /var/lib/docker/volumes/portainer_portainer_data
+
+      Backup Command:
+        docker exec postgres_main pg_dumpall -U pgadmin > /root/backup_\$(date +%Y%m%d).sql
+
+      --------------------------------------------------------------------------------
+      NEXT STEPS
+      --------------------------------------------------------------------------------
+      1. SSH into the server: ssh admin@$SERVER_IP
+      2. Access Portainer and set up admin account
+      3. Configure Inspect AI API keys in /opt/inspect-ai/.env.local
+      4. Test Inspect AI with a simple evaluation
+      5. Deploy FlagWise using the instructions above
+      6. Set up regular backups
+      7. Configure monitoring and alerting
+
+      ================================================================================
+      EOF
+
+      chmod 600 /root/DEPLOYMENT_INFO.txt
+
+      echo "=== Infrastructure Setup Complete ==="
+      echo "Deployment info saved to /root/DEPLOYMENT_INFO.txt"
+      cat /root/DEPLOYMENT_INFO.txt
+    permissions: '0755'
+
+# Run commands on first boot
+runcmd:
+  # Install Docker
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  # Add admin user to docker group
+  - usermod -aG docker admin
+
+  # Enable and start Docker
+  - systemctl enable docker
+  - systemctl start docker
+
+  # Install Docker Compose standalone (for compatibility)
+  - curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  - chmod +x /usr/local/bin/docker-compose
+
+  # Configure automatic security updates
+  - echo 'Unattended-Upgrade::Automatic-Reboot "false";' >> /etc/apt/apt.conf.d/50unattended-upgrades
+  - echo 'Unattended-Upgrade::Automatic-Reboot-Time "03:00";' >> /etc/apt/apt.conf.d/50unattended-upgrades
+  - systemctl enable unattended-upgrades
+
+  # Setup firewall
+  - bash /tmp/setup-firewall.sh
+
+  # Create necessary directories
+  - mkdir -p /opt/postgresql/init
+  - mkdir -p /opt/inspect-ai/logs /opt/inspect-ai/evals /opt/inspect-ai/datasets /opt/inspect-ai/config
+
+  # Run main setup script
+  - bash /tmp/setup-infrastructure.sh > /var/log/infrastructure-setup.log 2>&1
+
+  # Clean up
+  - rm /tmp/setup-firewall.sh
+  - rm /tmp/setup-infrastructure.sh
+
+# Final message
+final_message: |
+  ================================================================================
+  Hetzner VPS Setup Complete!
+  ================================================================================
+
+  The system has been configured with:
+  - Docker and Docker Compose
+  - Portainer (Docker Management UI)
+  - PostgreSQL (with Inspect AI and FlagWise databases)
+  - Inspect AI (for LLM evaluations)
+  - Firewall (UFW) with necessary ports open
+  - Automatic security updates
+
+  IMPORTANT: Check /root/DEPLOYMENT_INFO.txt for all credentials and access details!
+
+  System is ready for use. Please secure your credentials immediately.
+  ================================================================================

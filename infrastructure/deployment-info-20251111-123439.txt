@@ -1,0 +1,94 @@
+================================================================================
+HETZNER VPS - LLM SECURITY AUDIT INFRASTRUCTURE
+================================================================================
+
+Deployment Date: Tue Nov 11 12:34:39 UTC 2025
+Server Created: Tue Nov 11 12:34:39 UTC 2025
+
+--------------------------------------------------------------------------------
+SERVER DETAILS
+--------------------------------------------------------------------------------
+Server ID: 112844187
+Server Name: llm-audit-vps-20251111-123335
+Server Type: cx23 (nbg1)
+Image: ubuntu-24.04
+
+IPv4: 167.235.28.228
+IPv6: 2a01:4f8:1c1e:9432::/64
+
+--------------------------------------------------------------------------------
+SSH ACCESS
+--------------------------------------------------------------------------------
+Command: ssh admin@167.235.28.228
+
+User: admin
+SSH Key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8o6ndVXDWrWfJZbJY8nQRRv162UWua2opUmYzNhSjC
+
+Root Password (if needed): N/A (SSH key only)
+
+--------------------------------------------------------------------------------
+IMPORTANT: CLOUD-INIT IN PROGRESS
+--------------------------------------------------------------------------------
+The server is currently running cloud-init setup. This process takes 5-10 minutes.
+
+Monitor progress:
+  ssh admin@167.235.28.228
+  sudo tail -f /var/log/cloud-init-output.log
+  sudo tail -f /var/log/infrastructure-setup.log
+
+After cloud-init completes, check:
+  sudo cat /root/DEPLOYMENT_INFO.txt
+
+This file contains:
+  - Portainer URL and initial password
+  - PostgreSQL connection details
+  - Inspect AI configuration
+  - FlagWise deployment instructions
+  - All service credentials
+
+--------------------------------------------------------------------------------
+SERVICES (Available after cloud-init completes)
+--------------------------------------------------------------------------------
+Portainer:       http://167.235.28.228:9000
+Portainer HTTPS: https://167.235.28.228:9443
+
+PostgreSQL:      167.235.28.228:5432
+  - Main DB:     audit_db (user: pgadmin)
+  - Inspect AI:  inspect_ai (user: inspect_user)
+  - FlagWise:    flagwise (user: flagwise_user)
+
+Inspect AI:      http://167.235.28.228:7000
+
+--------------------------------------------------------------------------------
+NEXT STEPS
+--------------------------------------------------------------------------------
+1. Wait for cloud-init to complete (5-10 minutes)
+2. SSH into the server: ssh admin@167.235.28.228
+3. Check deployment info: sudo cat /root/DEPLOYMENT_INFO.txt
+4. Access Portainer and set up admin account
+5. Configure Inspect AI API keys
+6. Deploy FlagWise (instructions in DEPLOYMENT_INFO.txt)
+
+--------------------------------------------------------------------------------
+HETZNER CLOUD MANAGEMENT
+--------------------------------------------------------------------------------
+View server in Hetzner Cloud Console:
+  https://console.hetzner.cloud/projects
+
+Delete server (when no longer needed):
+  curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+    https://api.hetzner.cloud/v1/servers/112844187
+
+Get server details:
+  curl -H "Authorization: Bearer $TOKEN" \
+    https://api.hetzner.cloud/v1/servers/112844187
+
+--------------------------------------------------------------------------------
+COST ESTIMATION
+--------------------------------------------------------------------------------
+Server Type: cx23
+Estimated Cost: ~€6-8/month (check Hetzner pricing for exact amount)
+
+Remember to delete the server when no longer needed to avoid charges!
+
+================================================================================
